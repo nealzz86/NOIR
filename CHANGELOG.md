@@ -5,6 +5,47 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **ROM detection** — `Rom` reads system properties once and recognises ColorOS /
+  HyperOS / MIUI / OriginOS / HarmonyOS / EMUI / MagicOS / One UI / Android, including
+  the version each vendor encodes differently (`V17.0.1.2` → ColorOS 17, `V140` →
+  MIUI 14, `V125` → 12.5, `70100` → One UI 7.1). The label is shown in the dashboard,
+  written to `report.json` / `report.md` as `rom`, and steers every OEM-specific hint.
+- **Effect verification** — `--apply` no longer trusts exit codes. Every command is
+  read back immediately and the whole batch is re-read afterwards (`verify.txt`),
+  with verdicts 已生效 / 未生效 / 被拒绝 / 无法确认. `rollback.txt` now only lists
+  changes that were confirmed on the device, so a rejected batch cannot leave a
+  rollback file full of state that never changed. `noir block --apply` uses the same
+  checks.
+- **`noir adblock`** — finds the components that carry system advertising on the
+  detected ROM, tiered 可停用 / 谨慎 / 别碰, and disables them with `pm disable-user`
+  after per-item confirmation (`--revert` restores). Curated rows come from public
+  slimming guides and are labelled as unverified; everything installed is also matched
+  by package pattern, so a missing list entry does not hide a finding. Never wired into
+  `auto --apply`, which stays app-ops only.
+- **ColorOS rules** — OPPO / OnePlus / realme prefixes (`com.oppo.`, `com.coloros.`,
+  `com.nearme.`, `com.heytap.`, `com.oplus.`) are covered in the advisor's keep-lists
+  (screen recorders survive three prefix migrations) and its core-package list
+  (OTA, SAU, activation, securepay, wallet, MCS). Device-verified calibration against
+  a ColorOS 17 phone is still outstanding.
+
+### Fixed
+
+- **ad subdomains on OEM infrastructure** — `api.push.oppomobile.com` was exempt from
+  blocking as a vendor domain, and the exemption was a plain substring test, so
+  `ads.oppomobile.com` and `adx.oppomobile.com` were exempt too. The exemption now
+  applies only when the host does not look like a tracker.
+- **silent appops rejection on ColorOS** — when the device answers `cmd appops set`
+  with success but leaves the mode unchanged, the terminal now says so and points at
+  the ROM-specific switch (Developer options → Permission monitoring) instead of
+  reporting a clean run.
+- **single-package `dumpsys package <pkg>`** — the parser required two leading spaces,
+  so the one-package form used by the effect recheck parsed as empty. Fixture added.
+- **the device guide box** — rows were hand-padded, so any line reworded in CJK broke
+  the right border. It is now built with the width-aware helpers and holds together
+  from 50 to 120 columns.
+
 ## [0.2.6] — 2026-11-04
 
 ### Fixed

@@ -49,6 +49,7 @@ object Tui {
         apps: List<AppEntry>,
         recommendations: List<Recommendation>,
         android: String = "?",
+        rom: String = "",
         host: String = "?",
         installed: Int = apps.size,
         ascii: Boolean = false,
@@ -114,6 +115,7 @@ object Tui {
         line("  ${s.dim(padRight("model", 9))} ${device.model.ifBlank { "unknown" }}")
         line("  ${s.dim(padRight("device", 9))} ${device.serial}  ${s.dim("·")}  ${device.product.ifBlank { "—" }}")
         line("  ${s.dim(padRight("android", 9))} $android  ${s.dim("·")}  $installed installed  ${s.dim("·")}  ${s.bold(apps.size.toString())} flagged")
+        if (rom.isNotBlank()) line("  ${s.dim(padRight("rom", 9))} $rom")
         line()
 
         // ── exposure ───────────────────────────────────────────────────────

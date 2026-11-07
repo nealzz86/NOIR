@@ -13,6 +13,7 @@ data class ReportMeta(
     val tool: String = "",
     val host: String = "",
     val android: String = "",
+    val rom: String = "",
     val sdk: String = "",
     val build: String = "",
     val fingerprint: String = "",

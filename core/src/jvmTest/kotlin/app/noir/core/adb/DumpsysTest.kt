@@ -115,4 +115,25 @@ class DumpsysTest {
         assertTrue(meta.perms.contains("INTERNET"))
         assertFalse(meta.perms.contains("RECORD_AUDIO"))
     }
+
+    @Test
+    fun `parses a single package dump used by the effect recheck`() {
+        val text = dump(
+            "Packages:",
+            "Package [com.heytap.market] (com.heytap.market):",
+            "  appId=10231",
+            "  flags=[ SYSTEM HAS_CODE ALLOW_CLEAR_USER_DATA ALLOW_BACKUP ]",
+            "  mEnabledSetting=3",
+            "  User 0: ceDataInode=1234 installed=true hidden=false suspended=false",
+            "    install permissions:",
+            "      android.permission.INTERNET: granted=true",
+            "      android.permission.ACCESS_FINE_LOCATION: granted=true"
+        )
+
+        val meta = Dumpsys.parse(text).getValue("com.heytap.market")
+        assertTrue(meta.isSystem)
+        assertEquals("10231", meta.appId)
+        assertTrue(meta.perms.contains("INTERNET"))
+        assertTrue(meta.perms.contains("ACCESS_FINE_LOCATION"))
+    }
 }

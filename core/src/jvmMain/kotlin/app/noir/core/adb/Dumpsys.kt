@@ -27,7 +27,7 @@ data class PkgMeta(
  */
 object Dumpsys {
 
-    private val PKG = Regex("^  Package \\[([^\\]]+)]")
+    private val PKG = Regex("^\\s*Package \\[([^\\]]+)]")
     private val SHARED_USER = Regex("^sharedUser=SharedUserSetting\\{[0-9a-f]+ ([^/]+)/")
     private val SHARED = Regex("^  SharedUser \\[([^\\]]+)]")
     private val PKG_SETTING = Regex("PackageSetting\\{[0-9a-f]+ ([^/]+)/")

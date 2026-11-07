@@ -89,6 +89,30 @@ class ClassifierTest {
     }
 
     @Test
+    fun `coloros components are categorised without relying on endpoints`() {
+        assertEquals(Category.TELEMETRY, Classifier.category("com.coloros.analytics", emptyList(), emptyList()))
+        assertEquals(Category.TELEMETRY, Classifier.category("com.nearme.statistics.rom", emptyList(), emptyList()))
+        assertEquals(Category.TELEMETRY, Classifier.category("com.heytap.openid", emptyList(), emptyList()))
+        assertEquals(Category.TELEMETRY, Classifier.category("com.oplus.deepthinker", emptyList(), emptyList()))
+        assertEquals(Category.PUSH, Classifier.category("com.heytap.mcs", emptyList(), emptyList()))
+        assertEquals(Category.GAME, Classifier.category("com.nearme.gamecenter", emptyList(), emptyList()))
+        assertEquals(Category.APP_STORE, Classifier.category("com.heytap.market", emptyList(), emptyList()))
+    }
+
+    @Test
+    fun `every coloros prefix maps to the oppo vendor`() {
+        listOf(
+            "com.heytap.mcs",
+            "com.oplus.deepthinker",
+            "com.coloros.analytics",
+            "com.oppo.ota",
+            "com.nearme.gamecenter"
+        ).forEach { pkg ->
+            assertEquals("OPPO", Classifier.vendor(pkg, emptyList()), pkg)
+        }
+    }
+
+    @Test
     fun `scoring rewards upload and command endpoints`() {
         val base = Rules.score(listOf("INTERNET", "READ_SMS"), emptyList(), false, false)
         val withUpload = Rules.score(listOf("INTERNET", "READ_SMS"), listOf("https://a.example.com/upload"), false, false)

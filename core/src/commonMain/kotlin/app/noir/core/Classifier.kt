@@ -44,7 +44,12 @@ object Classifier {
         "(^|[./_-])(analytics|track|tracker|tracking|stat|stats|beacon|telemetry|misight|onetrack|logging)([./_-]|$)"
     )
     private val ADS = Regex(
-        "(^|[./_-])(ads?|advert|advertising|doubleclick|pangle|sigmob)([./_-]|$)"
+        "(^|[./_-])(" +
+            "ads?|advert|advertising|advertisement|" +
+            "doubleclick|admob|googleads|googlesyndication|" +
+            "gdt|gdtimg|tanx|admaster|" +
+            "pangle|sigmob|inmobi|applovin|chartboost|unityads|ironsource|vungle|mintegral|tradplus" +
+            ")([./_-]|$)"
     )
 
     private data class VendorRule(val vendor: String, val prefixes: List<String>)
@@ -95,11 +100,17 @@ object Classifier {
         VendorDomain("vivo", listOf("vivo.com.cn", "vivo.com", "iqoo.com")),
         VendorDomain("Huawei", listOf("huawei.com", "hicloud.com", "hihonor.com")),
         VendorDomain("Samsung", listOf("samsung.com", "samsungapps.com")),
-        VendorDomain("Tencent", listOf("qq.com", "tencent.com", "tencent-cloud.net", "weixin.qq.com")),
+        VendorDomain("Tencent", listOf("qq.com", "tencent.com", "tencent-cloud.net", "weixin.qq.com", "gdtimg.com")),
         VendorDomain("Alibaba", listOf("alibaba.com", "aliyun.com", "taobao.com", "tmall.com", "amap.com", "ucweb.com", "uc.cn", "alipay.com")),
         VendorDomain("Baidu", listOf("baidu.com", "bdstatic.com", "bcebos.com")),
         VendorDomain("ByteDance", listOf("bytedance.com", "bytcdn.com", "zijieapi.com", "snssdk.com", "toutiao.com", "tiktokv.com", "pangle.io", "oceanengine.com")),
-        VendorDomain("Google", listOf("google.com", "googleapis.com", "gstatic.com", "youtube.com", "android.com")),
+        VendorDomain(
+            "Google",
+            listOf(
+                "google.com", "googleapis.com", "gstatic.com", "youtube.com", "android.com",
+                "googleadservices.com", "googlesyndication.com", "doubleclick.net", "admob.com"
+            )
+        ),
         VendorDomain("Meta", listOf("facebook.com", "facebook.net", "instagram.com", "fb.com", "whatsapp.com")),
         VendorDomain("Meituan", listOf("meituan.com", "dianping.com", "sankuai.com")),
         VendorDomain("Pinduoduo", listOf("pinduoduo.com", "yangkeduo.com")),
@@ -129,6 +140,13 @@ object Classifier {
         "com.bsp.catchlog" to Category.SECURITY,
         "com.miui.cleanmaster" to Category.SECURITY,
         "com.miui.systemadsolution" to Category.ADS,
+        "com.coloros.analytics" to Category.TELEMETRY,
+        "com.nearme.statistics.rom" to Category.TELEMETRY,
+        "com.heytap.openid" to Category.TELEMETRY,
+        "com.oplus.deepthinker" to Category.TELEMETRY,
+        "com.heytap.mcs" to Category.PUSH,
+        "com.nearme.gamecenter" to Category.GAME,
+        "com.heytap.market" to Category.APP_STORE,
         "com.xiaomi.market" to Category.APP_STORE,
         "com.android.vending" to Category.APP_STORE,
         "com.mobiletools.systemhelper" to Category.CARRIER,

@@ -42,7 +42,14 @@ object Advisor {
         "com.android.settings",
         "com.android.phone",
         "com.android.mms",
-        "com.android.incallui"
+        "com.android.incallui",
+        "com.oppo.ota",
+        "com.coloros.sau",
+        "com.nearme.romupdate",
+        "com.coloros.activation",
+        "com.coloros.securepay",
+        "com.finshell.wallet",
+        "com.heytap.mcs"
     )
 
     /** Apps where screen capture is a legitimate, user-facing feature. */
@@ -52,6 +59,11 @@ object Advisor {
         "com.miui.carlink",
         "com.miui.accessibility",
         "com.xiaomi.mirror",
+        // ColorOS moved this package across three prefixes; the recorder is the
+        // same feature on different releases, and a miss here is a false finding.
+        "com.coloros.screenrecorder",
+        "com.heytap.screenrecord",
+        "com.oplus.screenrecorder",
         "com.android.chrome",
         "com.google.android.youtube",
         "com.tencent.mm",

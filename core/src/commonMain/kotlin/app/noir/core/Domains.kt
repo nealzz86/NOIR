@@ -70,7 +70,7 @@ object Domains {
     )
 
     private val BLOCK_EXACT = setOf(
-        "log", "logs", "ads", "ad", "mon", "px", "ut", "mam", "up4"
+        "log", "logs", "ads", "ad", "adx", "dsp", "mon", "px", "ut", "mam", "up4"
     )
 
     private val BLOCK_SUBSTRINGS = listOf(
@@ -79,7 +79,10 @@ object Domains {
         "telemetry", "umeng", "appsflyer", "adjust", "oceanengine", "zijieapi", "qplus",
         "snssdk", "cnzz", "growingio", "sensorsdata", "mixpanel", "amplitude", "pangle",
         "sigmob", "adashx", "pingma", "talkingdata", "bugtrace", "huatuo", "apmplus",
-        "coverage", "zxid", "oaid", "wkanx", "videoreport"
+        "coverage", "zxid", "oaid", "wkanx", "videoreport",
+        "admob", "googleads", "googlesyndication", "doubleclick", "gdtimg", "tanx",
+        "admaster", "inmobi", "applovin", "unityads", "chartboost", "ironsource",
+        "vungle", "mintegral", "tradplus", "adsense", "googleadservices"
     )
 
     private val TEST_LABELS = setOf(
@@ -115,16 +118,23 @@ object Domains {
         if (labels.any { it in TEST_LABELS }) return DomainClass.REVIEW
 
         if (labels.any { it in FUNCTIONAL_LABELS }) return DomainClass.FUNCTIONAL
-        if (FUNCTIONAL_SUBSTRINGS.any { host.contains(it) }) return DomainClass.FUNCTIONAL
 
-        if (labels.any { it in BLOCK_EXACT }) return DomainClass.TRACKER
-        if (labels.any { label -> BLOCK_SUBSTRINGS.any { label.contains(it) } }) return DomainClass.TRACKER
+        // OEM infrastructure is exempt only while it looks like infrastructure:
+        // `api.push.oppomobile.com` carries push, `ads.oppomobile.com` carries ads.
+        if (FUNCTIONAL_SUBSTRINGS.any { host.contains(it) } && !looksLikeTracker(labels)) {
+            return DomainClass.FUNCTIONAL
+        }
 
-        // `stat` / `stats` / `statistic` are trackers; `status` is not.
-        if (labels.any { it.startsWith("stat") && !it.startsWith("status") }) return DomainClass.TRACKER
+        if (looksLikeTracker(labels)) return DomainClass.TRACKER
 
         return DomainClass.REVIEW
     }
+
+    private fun looksLikeTracker(labels: List<String>): Boolean =
+        labels.any { it in BLOCK_EXACT } ||
+            labels.any { label -> BLOCK_SUBSTRINGS.any { marker -> label.contains(marker) } } ||
+            // `stat` / `stats` / `statistic` are trackers; `status` is not.
+            labels.any { it.startsWith("stat") && !it.startsWith("status") }
 
     fun isTestHost(host: String): Boolean =
         host.lowercase().split('.').any { it in TEST_LABELS }

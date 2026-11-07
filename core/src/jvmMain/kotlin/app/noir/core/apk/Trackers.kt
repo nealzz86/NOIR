@@ -35,7 +35,25 @@ object Trackers {
         "getui" to "Getui",
         "jpush" to "JPush",
         "xmpush" to "MiPush",
-        "umengcloud" to "Umeng"
+        "umengcloud" to "Umeng",
+        "doubleclick.net" to "Google AdMob",
+        "googlesyndication.com" to "Google AdMob",
+        "googleadservices.com" to "Google AdMob",
+        "sigmob" to "Sigmob",
+        "tanx.com" to "Alibaba",
+        "admaster" to "AdMaster",
+        "gdtimg.com" to "Tencent Ads",
+        "inmobi.com" to "inMobi",
+        "applovin.com" to "AppLovin",
+        "unityads" to "Unity Ads",
+        "chartboost.com" to "Chartboost",
+        "ironsrc.com" to "ironSource",
+        "vungle.com" to "Vungle",
+        "mintegral.com" to "Mintegral",
+        "tradplus" to "TradPlus",
+        "wanyol.com" to "OPPO Ads",
+        "heytapmobi.com" to "OPPO",
+        "oppomobile.com" to "OPPO"
     )
 
     private val PACKAGES: List<Pair<String, String>> = listOf(
@@ -59,7 +77,23 @@ object Trackers {
         "com/sensorsdata" to "Sensors",
         "com/igexin" to "Getui",
         "cn/jpush" to "JPush",
-        "com/xiaomi/push" to "MiPush"
+        "com/xiaomi/push" to "MiPush",
+        "com/google/android/gms/ads" to "Google AdMob",
+        "com/bun/msa" to "MSA OAID",
+        "com/alibaba/openid" to "MSA OAID",
+        "com/heytap/openid" to "OPPO OAID",
+        "com/bytedance/sdk/openadsdk" to "Pangle",
+        "com/sigmob" to "Sigmob",
+        "com/qq/e" to "Tencent Ads",
+        "com/kwad" to "Kuaishou Ads",
+        "com/unity3d/ads" to "Unity Ads",
+        "com/applovin" to "AppLovin",
+        "com/ironsource" to "ironSource",
+        "com/chartboost" to "Chartboost",
+        "com/vungle" to "Vungle",
+        "com/mintegral" to "Mintegral",
+        "com/inmobi" to "inMobi",
+        "com/tradplus" to "TradPlus"
     )
 
     fun fromEndpoints(urls: List<String>): Set<String> {

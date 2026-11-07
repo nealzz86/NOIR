@@ -39,6 +39,33 @@ class DomainsTest {
     }
 
     @Test
+    fun `an oem infrastructure domain can still host ads`() {
+        // The exemption used to be a plain substring test, which made every
+        // `*.oppomobile.com` look functional and hid the ad endpoints under it.
+        assertEquals(DomainClass.TRACKER, Domains.classify("ads.oppomobile.com"))
+        assertEquals(DomainClass.TRACKER, Domains.classify("adx.oppomobile.com"))
+        assertEquals(DomainClass.TRACKER, Domains.classify("stat.heytapmobi.com"))
+        assertEquals(DomainClass.FUNCTIONAL, Domains.classify("api.push.oppomobile.com"))
+        assertEquals(DomainClass.FUNCTIONAL, Domains.classify("www.oppomobile.com"))
+    }
+
+    @Test
+    fun `google ad networks are trackers`() {
+        assertEquals(DomainClass.TRACKER, Domains.classify("pagead2.googlesyndication.com"))
+        assertEquals(DomainClass.TRACKER, Domains.classify("pubads.g.doubleclick.net"))
+        assertEquals(DomainClass.TRACKER, Domains.classify("googleads.g.doubleclick.net"))
+        assertEquals(DomainClass.TRACKER, Domains.classify("adsense.googleapis.com"))
+    }
+
+    @Test
+    fun `tencent ad image cdn is a tracker`() {
+        assertEquals(DomainClass.TRACKER, Domains.classify("gdtimg.com"))
+        assertEquals(DomainClass.TRACKER, Domains.classify("rpt.gdtimg.com"))
+        // gtimg is Tencent's general static CDN, not an ad endpoint.
+        assertEquals(DomainClass.REVIEW, Domains.classify("qtimg.gtimg.com"))
+    }
+
+    @Test
     fun `infrastructure hosts and bare IPs are ignored`() {
         assertTrue(Domains.isIgnored("schemas.android.com"))
         assertTrue(Domains.isIgnored("www.w3.org"))

@@ -7,6 +7,7 @@ package app.noir.cli
 
 import app.noir.core.Device
 import app.noir.core.ReportMeta
+import app.noir.core.Verdict
 import app.noir.core.adb.Adb
 import app.noir.core.platform.Platform
 import java.io.File
@@ -30,26 +31,27 @@ class ApplyTest {
             """.trimIndent() + "\n"
         )
         script.setExecutable(true)
-        val result = ScanResult(
-            device = Device("serial", "device", "PLK110", "p1"),
-            apps = emptyList(),
-            outDir = dir,
-            android = "16",
-            installed = 0,
-            paths = emptyMap(),
-            meta = ReportMeta(
-                tool = "NOIR test",
-                host = "test host",
-                android = "16",
-                sdk = "36",
-                build = "PLK110_16.0.0",
-                fingerprint = "test/fingerprint",
-                user = "0",
-                generatedAt = "2026-11-04T00:00:00Z"
-            )
-        )
-        return script to result
+        return script to scanResult(dir)
     }
+
+    private fun scanResult(dir: File) = ScanResult(
+        device = Device("serial", "device", "PLK110", "p1"),
+        apps = emptyList(),
+        outDir = dir,
+        android = "16",
+        installed = 0,
+        paths = emptyMap(),
+        meta = ReportMeta(
+            tool = "NOIR test",
+            host = "test host",
+            android = "16",
+            sdk = "36",
+            build = "PLK110_16.0.0",
+            fingerprint = "test/fingerprint",
+            user = "0",
+            generatedAt = "2026-11-04T00:00:00Z"
+        )
+    )
 
     @Test
     fun `failed appops keeps stdout and stderr in applied txt`() {
@@ -102,5 +104,58 @@ class ApplyTest {
         assertTrue(applied.contains("cmd appops set --user 0 com.example PROJECT_MEDIA ignore\tok (0)"))
         assertTrue(applied.contains("after:  PROJECT_MEDIA: ignore"))
         assertTrue(rollback.contains("adb shell cmd appops set --user 0 com.example PROJECT_MEDIA default"))
+    }
+
+    /**
+     * The ColorOS case: every command exits 0 and nothing changes. A rollback file
+     * full of commands for state that was never touched would be worse than none.
+     *
+     * Written for both shells because this is the behaviour the feature exists for,
+     * and CI on macOS alone would leave it unproven on the platform most users run.
+     */
+    @Test
+    fun `a device that reports success without changing the mode writes no rollback`() {
+        val dir = Files.createTempDirectory("noir-apply").toFile()
+        val script = if (Platform.isWindows) {
+            File(dir, "fake-adb.cmd").apply {
+                writeText(
+                    """
+                    @echo off
+                    set "OP=%~4"
+                    echo %OP% | findstr /C:"appops get" >nul && (echo PROJECT_MEDIA: default& exit /b 0)
+                    echo %OP% | findstr /C:"appops set" >nul && exit /b 0
+                    exit /b 1
+                    """.trimIndent()
+                )
+            }
+        } else {
+            File(dir, "fake-adb").apply {
+                writeText(
+                    """
+                    #!/bin/sh
+                    cmd="${'$'}4"
+                    case "${'$'}cmd" in
+                      *"cmd appops get"*) echo "PROJECT_MEDIA: default"; exit 0 ;;
+                      *"cmd appops set"*) exit 0 ;;
+                    esac
+                    exit 1
+                    """.trimIndent() + "\n"
+                )
+                setExecutable(true)
+            }
+        }
+        val result = scanResult(dir)
+
+        applyCommands(Adb(script.absolutePath), result, listOf(AppOpAction("com.example", "PROJECT_MEDIA")))
+
+        val applied = File(result.outDir, "applied.txt").readText()
+        val rollback = File(result.outDir, "rollback.txt").readText()
+        val verify = File(result.outDir, "verify.txt").readText()
+
+        assertTrue(applied.contains("ok (0)"), applied)
+        assertTrue(applied.contains("复核: ${Verdict.NO_EFFECT.label}"), applied)
+        assertTrue(rollback.contains("no appops changes were applied"), rollback)
+        assertTrue(verify.contains(Verdict.NO_EFFECT.label), verify)
+        assertTrue(verify.contains("复核读的是设备当前状态，不是命令退出码"), verify)
     }
 }

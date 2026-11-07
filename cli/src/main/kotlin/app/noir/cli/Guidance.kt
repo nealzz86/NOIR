@@ -5,6 +5,8 @@
  */
 package app.noir.cli
 
+import app.noir.core.RomInfo
+import app.noir.core.RomKind
 import app.noir.core.Tui
 
 /** Human-friendly text blocks: every failure should end with an action. */
@@ -74,23 +76,54 @@ object Guidance {
         return sb.toString()
     }
 
-    fun deviceGuide(): String = """
-        |╭─ 没有检测到设备 ──────────────────────────────────────────────╮
-        |│                                                              │
-        |│  1. 打开开发者模式                                           │
-        |│     小米 / HyperOS：设置 → 我的设备 → 全部参数 → 连点「MIUI 版本」7 次
-        |│     原生 Android：设置 → 关于手机 → 连点「版本号」7 次        │
-        |│                                                              │
-        |│  2. 开启 USB 调试                                            │
-        |│     设置 → 系统 → 开发者选项 → USB 调试                      │
-        |│     Xiaomi 额外开启：USB 调试（安全设置）                     │
-        |│                                                              │
-        |│  3. 插线后手机会弹「允许 USB 调试吗？」                       │
-        |│     勾选「一律允许使用这台计算机进行调试」→ 允许              │
-        |│                                                              │
-        |│  4. 还不行就换一根数据线（很多线只能充电）                    │
-        |╰──────────────────────────────────────────────────────────────╯
-    """.trimMargin()
+    /**
+     * Built with the same width-aware helpers as [about] rather than a literal box:
+     * CJK steps are wider than they look, and a hand-padded border breaks the
+     * moment a line is reworded or the console is 50 columns.
+     */
+    fun deviceGuide(): String {
+        val total = (Tui.terminalColumns() - 2).coerceIn(50, 100)
+        val inner = total - 4
+
+        fun row(text: String) = "│ " + pad(text, inner) + " │"
+
+        val sb = StringBuilder()
+        // "╭─ 没有检测到设备 " is 18 columns, so the dashes have to give the rest.
+        sb.append("╭─ 没有检测到设备 ").append("─".repeat(total - 19)).append("╮").append('\n')
+
+        fun step(title: String, vararg lines: String) {
+            wrap(title, inner).forEach { sb.append(row(it)).append('\n') }
+            lines.forEach { text ->
+                // Reserve the indent from the wrap width, otherwise a wrapped
+                // continuation pushes the right border off the screen.
+                wrap(text, inner - 6).forEachIndexed { index, part ->
+                    sb.append(row((if (index == 0) "    " else "      ") + part)).append('\n')
+                }
+            }
+            sb.append(row("")).append('\n')
+        }
+
+        step(
+            "  1. 打开开发者模式",
+            "小米 / HyperOS：设置 → 我的设备 → 全部参数 → 连点「MIUI 版本」7 次",
+            "OPPO / 一加 / 真我：设置 → 关于本机 → 版本信息 → 连点「版本号」7 次",
+            "原生 Android：设置 → 关于手机 → 连点「版本号」7 次"
+        )
+        step(
+            "  2. 开启 USB 调试",
+            "设置 → 系统 → 开发者选项 → USB 调试",
+            "ColorOS：设置 → 系统设置 → 开发者选项（要先登录 OPPO 账号）",
+            "Xiaomi 额外开启：USB 调试（安全设置）"
+        )
+        step(
+            "  3. 插线后手机会弹「允许 USB 调试吗？」",
+            "勾选「一律允许使用这台计算机进行调试」→ 允许"
+        )
+        wrap("  4. 还不行就换一根数据线（很多线只能充电）", inner).forEach { sb.append(row(it)).append('\n') }
+
+        sb.append('╰').append("─".repeat(total - 2)).append('╯')
+        return sb.toString()
+    }
 
     fun unauthorizedGuide(): String = """
         |设备已连接，但没有授权。
@@ -112,6 +145,28 @@ object Guidance {
         |  • Windows：scoop install jadx
         |  • Debian/Ubuntu：apt install jadx
         |  • 或者让 NOIR 自己下载：noir setup
+    """.trimMargin()
+
+    /** The device answered success and changed nothing — the usual OEM shell outcome. */
+    fun silentRejectNote(rom: RomInfo): String = """
+        |${silentRejectHead(rom)} 逐条结论见 verify.txt：
+        |  • ColorOS：设置 → 系统设置（或其他设置）→ 开发者选项 → 「权限监控」选「允许修改」
+        |  • MIUI/HyperOS：开发者选项 → USB 调试（安全设置），需要登录账号并插 SIM
+        |  • 仍然无效：NOIR 只走 adb 通道，Shizuku / root 路径暂未支持
+    """.trimMargin()
+
+    private fun silentRejectHead(rom: RomInfo): String = when (rom.kind) {
+        RomKind.COLOROS -> "ColorOS 让 appops 返回成功，但没有真的改模式（${rom.display}）。"
+        RomKind.HYPEROS, RomKind.MIUI -> "HyperOS/MIUI 拒绝了 shell 侧的 AppOps 修改。"
+        RomKind.ORIGINOS -> "OriginOS 拦掉了 shell 侧的 AppOps 修改。"
+        else -> "设备报告成功，但状态没有变化。"
+    }
+
+    fun adblockNote(rom: RomInfo): String = """
+        |清单按 ${rom.display} 给出。带「清单」的行来自公开的 ColorOS / MIUI 精简笔记，
+        |NOIR 没有在真机逐项验证；带「推断」的行只按包名形态匹配，需要你判断。
+        |停用一律可恢复：pm enable <包名>，恢复命令已写进 adblock-rollback.txt。
+        |「别碰」一档 NOIR 不执行，只用来说明这些包同样在广告链路上。
     """.trimMargin()
 
     fun error(title: String, hint: String? = null): String {

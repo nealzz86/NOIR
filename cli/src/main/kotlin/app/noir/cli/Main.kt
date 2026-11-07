@@ -6,18 +6,26 @@
 package app.noir.cli
 
 import app.noir.core.ActionType
+import app.noir.core.AdTarget
+import app.noir.core.AdTargets
 import app.noir.core.Advisor
 import app.noir.core.AppEntry
 import app.noir.core.Cache
 import app.noir.core.Category
+import app.noir.core.CheckResult
 import app.noir.core.Classifier
 import app.noir.core.Domains
 import app.noir.core.Device
 import app.noir.core.Recommendation
 import app.noir.core.Report
 import app.noir.core.ReportMeta
+import app.noir.core.Rom
+import app.noir.core.RomInfo
+import app.noir.core.RomKind
 import app.noir.core.Rules
 import app.noir.core.Tui
+import app.noir.core.Verify
+import app.noir.core.Verdict
 import app.noir.core.adb.Adb
 import app.noir.core.adb.DeviceScan
 import app.noir.core.adb.Dumpsys
@@ -40,7 +48,7 @@ private val VERSION: String =
 
 private val BOOLEAN_FLAGS = setOf(
     "apply", "yes", "verbose", "help", "ascii", "color", "no-color", "quiet", "no-clear",
-    "all", "purge"
+    "all", "purge", "revert"
 )
 
 private var QUIET = false
@@ -85,6 +93,7 @@ private fun runMain(args: Array<String>) {
         "deep" -> cmdDeep(args.drop(1))
         "deepscan" -> cmdDeepScan(args.drop(1))
         "block" -> cmdBlock(args.drop(1))
+        "adblock" -> cmdAdblock(args.drop(1))
         "setup" -> cmdSetup(args.drop(1))
         "doctor" -> cmdDoctor(args.drop(1))
         "-h", "--help", "help" -> usage()
@@ -120,6 +129,7 @@ private fun usage() {
           noir deep <package> [options]       pull one APK, run jadx, grep for red flags
           noir deepscan [options]             decompile the riskiest apps, then offer cleanup
           noir block <package...> [options]   print (or apply) neutralisation commands
+          noir adblock [options]              find and disable system ad components
 
         options:
           --serial <id>      target a specific device
@@ -139,6 +149,10 @@ private fun usage() {
           --all              decompile every flagged app (slow, lots of disk)
           --jobs <n>         parallel jadx processes (default: cpu/2, max 6)
           --purge            also offer to uninstall risky user apps
+
+        adblock only:
+          --apply            run `pm disable-user` on the components you confirm
+          --revert           re-enable everything adblock --apply disabled
 
         display:
           --ascii            plain ASCII borders (legacy Windows console)
@@ -263,7 +277,8 @@ internal data class ScanResult(
     val android: String,
     val installed: Int,
     val paths: Map<String, String>,
-    val meta: ReportMeta
+    val meta: ReportMeta,
+    val rom: RomInfo = RomInfo()
 )
 
 private fun cmdScan(raw: List<String>) {
@@ -390,6 +405,8 @@ private fun cmdDeep(raw: List<String>) {
     println("[+] sources: ${src.absolutePath}")
 }
 
+private data class BlockAction(val command: String, val kind: String, val pkg: String, val op: String = "")
+
 private fun cmdBlock(raw: List<String>) {
     val args = Args(raw)
     val pkgs = args.positional
@@ -398,17 +415,18 @@ private fun cmdBlock(raw: List<String>) {
     val adb = connectAdb(args)
     val device = awaitDevice(adb, args.value("serial"), interactive = isInteractive())
 
-    val actions = ArrayList<String>()
-    pkgs.forEach { pkg ->
-        actions += "pm uninstall --user 0 $pkg"
-        actions += "cmd appops set $pkg PROJECT_MEDIA ignore"
-        actions += "cmd appops set $pkg GET_USAGE_STATS ignore"
+    val plan = pkgs.flatMap { pkg ->
+        listOf(
+            BlockAction("pm uninstall --user 0 $pkg", KIND_UNINSTALL, pkg),
+            BlockAction("cmd appops set $pkg PROJECT_MEDIA ignore", KIND_APPOPS, pkg, "PROJECT_MEDIA"),
+            BlockAction("cmd appops set $pkg GET_USAGE_STATS ignore", KIND_APPOPS, pkg, "GET_USAGE_STATS")
+        )
     }
 
     println("# rollback")
     pkgs.forEach { println("#   adb -s ${device.serial} shell pm install-existing --user 0 $it") }
     println()
-    actions.forEach { println("adb -s ${device.serial} shell $it") }
+    plan.forEach { println("adb -s ${device.serial} shell ${it.command}") }
 
     if (!args.flag("apply")) {
         println()
@@ -417,11 +435,298 @@ private fun cmdBlock(raw: List<String>) {
     }
 
     println()
-    actions.forEach { action ->
-        print("> $action ... ")
-        val result = adb.shell(device.serial, action)
+    val changes = ArrayList<ChangeRecord>()
+    plan.forEach { action ->
+        print("> ${action.command} ... ")
+        val result = adb.shell(device.serial, action.command)
         println(if (result.ok) "ok" else "failed (${result.code}) ${result.output.trim().take(120)}")
+        changes += ChangeRecord(
+            pkg = action.pkg,
+            kind = action.kind,
+            op = action.op,
+            command = action.command,
+            rollback = "pm install-existing --user 0 ${action.pkg}"
+        )
     }
+
+    val props = readProps(adb, device)
+    val rom = Rom.detect(props)
+    val meta = readReportMeta(adb, device, props, rom)
+    val checks = verifyChanges(adb, device.serial, "0", changes)
+    if (checks.isNotEmpty()) {
+        println()
+        println("[*] 复扫复核: ${Verify.summary(checks)}")
+        checks.filter { it.verdict != Verdict.EFFECTIVE }.forEach {
+            println("  ${it.verdict.label}  ${it.subject}  ${it.detail}")
+        }
+        val outDir = File(args.value("out") ?: "noir-out").apply { mkdirs() }
+        writeVerifyReport(outDir, meta, device, rom, checks, "block-verify.txt")
+        if (checks.any { it.verdict == Verdict.NO_EFFECT }) println(Guidance.silentRejectNote(rom))
+    }
+}
+
+// ── adblock ────────────────────────────────────────────────────────────────
+
+private fun cmdAdblock(raw: List<String>) {
+    val args = Args(raw)
+    if (args.flag("revert")) {
+        revertAdblock(args)
+        return
+    }
+
+    val result = performScan(args)
+    val adb = connectAdb(args)
+    val user = result.meta.user.ifBlank { "0" }
+    val targets = AdTargets.onDevice(result.paths.keys, result.rom.kind)
+
+    println()
+    if (targets.isEmpty()) {
+        println("[*] 这台设备上没匹配到广告组件。")
+        if (AdTargets.table(result.rom.kind).isEmpty()) {
+            println("    ${result.rom.display} 没有内置清单，只做了包名推断；清单目前覆盖 ColorOS / HyperOS / MIUI。")
+        }
+        return
+    }
+
+    val alreadyDisabled = disabledPackages(adb, result.device.serial)
+    val actionable = targets.filter { it.actionable && it.pkg !in alreadyDisabled }
+
+    println("== 广告相关组件 (${targets.size} 个，可停用 ${actionable.size} 个) ==")
+    targets.forEach { target ->
+        val state = if (target.pkg in alreadyDisabled) " · 已停用" else ""
+        println("  ${target.tier.label}  ${target.pkg}  [${target.source}]$state")
+        println("        ${target.name} · ${target.channel}")
+    }
+    println()
+    println(Guidance.adblockNote(result.rom))
+
+    writeAdblockFiles(result, targets, actionable.mapTo(HashSet()) { it.pkg })
+
+    if (!args.flag("apply")) {
+        println()
+        println("[*] dry-run — 加 --apply 逐条确认这 ${actionable.size} 条 pm disable-user")
+        println("[*] 恢复：noir adblock --revert --out ${args.value("out") ?: "noir-out"}")
+        return
+    }
+    if (actionable.isEmpty()) {
+        println("[*] 可停用的都已经是停用状态；「别碰」一档 NOIR 不执行。")
+        return
+    }
+
+    val selected = if (args.flag("yes")) actionable else pickAdblockTargets(actionable)
+    if (selected.isNullOrEmpty()) {
+        if (selected != null) println("aborted")
+        return
+    }
+
+    applyAdblock(adb, result, selected, user)
+}
+
+/**
+ * One prompt per component, because the curated list is not device-verified.
+ * `a` takes the rest so a known-good ROM does not cost 15 keystrokes.
+ */
+private fun pickAdblockTargets(actionable: List<AdTarget>): List<AdTarget>? {
+    if (!isInteractive()) {
+        println("[!] --apply 在非交互环境下需要同时加 --yes")
+        return null
+    }
+    val chosen = ArrayList<AdTarget>()
+    var takeRest = false
+    actionable.forEach { target ->
+        if (takeRest) {
+            chosen += target
+            return@forEach
+        }
+        print("停用 ${target.pkg}（${target.name}）? [y/n/a=其余全部] ")
+        when (readLine()?.trim()?.lowercase()) {
+            "y", "yes" -> chosen += target
+            "a" -> {
+                chosen += target
+                takeRest = true
+            }
+
+            "n", "no" -> println("      跳过 ${target.pkg}")
+            else -> {
+                println("aborted")
+                return null
+            }
+        }
+    }
+    return chosen
+}
+
+private fun applyAdblock(adb: Adb, result: ScanResult, targets: List<AdTarget>, user: String) {
+    val serial = result.device.serial
+    val applied = ArrayList<String>()
+    val rollback = ArrayList<String>()
+    val changes = ArrayList<ChangeRecord>()
+
+    applied.add("# NOIR adblock")
+    applied.add("# generated: ${result.meta.generatedAt}")
+    applied.add("# tool: ${result.meta.tool}")
+    applied.add("# host: ${result.meta.host}")
+    applied.add("# device: ${result.device.model} (${result.device.serial}) · ${result.device.product}")
+    applied.add("# rom: ${result.meta.rom.ifBlank { "unrecognised" }}")
+    applied.add("# user: $user")
+    applied.add("#")
+
+    rollback.add("# NOIR adblock rollback")
+    rollback.add("# generated: ${result.meta.generatedAt}")
+    rollback.add("# every component a disable command was sent for; re-enabling an")
+    rollback.add("# already-enabled app is a no-op, so the list is deliberately generous")
+    rollback.add("#")
+
+    println()
+    targets.forEach { target ->
+        val command = "pm disable-user --user $user ${target.pkg}"
+        val res = adb.shell(serial, command, timeoutSec = 30)
+        val status = when {
+            res.timedOut -> "timeout (${res.code})"
+            res.ok -> "ok (0)"
+            else -> "failed (${res.code})"
+        }
+        val inline = Verify.disabledByMessage(res.output)
+
+        applied.add("$command\t$status")
+        applied.add("  output: ${flatOutput(res.output)}")
+        applied.add("  即时回执: ${inline.label}")
+
+        println("  $command  $status")
+        if (!res.ok) res.output.trim().lineSequence().filter { it.isNotBlank() }.take(3)
+            .forEach { println("      $it") }
+        if (inline == Verdict.NO_EFFECT) println("      即时回执：${inline.label}（命令说没改成功）")
+
+        rollback.add("adb -s $serial shell pm enable --user $user ${target.pkg}")
+        changes += ChangeRecord(
+            pkg = target.pkg,
+            kind = KIND_DISABLE,
+            command = command,
+            rollback = "pm enable --user $user ${target.pkg}"
+        )
+    }
+
+    File(result.outDir, "adblock.txt").writeText(applied.joinToString("\n", postfix = "\n"))
+    File(result.outDir, "adblock-rollback.txt").writeText(rollback.joinToString("\n", postfix = "\n"))
+    println()
+    println("[*] applied:  ${File(result.outDir, "adblock.txt").absolutePath}")
+    println("[*] rollback: ${File(result.outDir, "adblock-rollback.txt").absolutePath}")
+
+    val checks = verifyChanges(adb, serial, user, changes)
+    if (checks.isEmpty()) return
+    println("[*] 复扫复核: ${Verify.summary(checks)}")
+    checks.filter { it.verdict != Verdict.EFFECTIVE }.take(10).forEach {
+        println("  ${"%-10s".format(it.verdict.label)} ${it.subject}  ${it.detail}")
+    }
+    writeVerifyReport(result.outDir, result.meta, result.device, result.rom, checks, "adblock-verify.txt")
+    if (checks.any { it.verdict == Verdict.NO_EFFECT }) println(Guidance.silentRejectNote(result.rom))
+}
+
+private val ROLLBACK_COMMAND = Regex("""^adb -s \S+ shell (pm enable .+)$""")
+
+private fun revertAdblock(args: Args) {
+    val outDir = File(args.value("out") ?: "noir-out")
+    val file = File(outDir, "adblock-rollback.txt")
+    if (!file.isFile) {
+        throw NoirException(
+            "没有找到 ${file.absolutePath}",
+            "只有执行过 noir adblock --apply 才会生成回滚文件；也可以手动 adb shell pm enable <包名>。"
+        )
+    }
+    val commands = file.readLines().mapNotNull { ROLLBACK_COMMAND.find(it.trim())?.groupValues?.get(1) }
+    if (commands.isEmpty()) throw NoirException("回滚文件里没有恢复命令。", "检查 ${file.absolutePath}")
+
+    val adb = connectAdb(args)
+    val device = awaitDevice(adb, args.value("serial"), interactive = isInteractive())
+
+    println("== 恢复 ${commands.size} 个组件 ==")
+    commands.forEach { println("  $it") }
+    if (!args.flag("yes") && !confirm("执行以上恢复命令? [Y/n] ")) {
+        println("aborted")
+        return
+    }
+
+    val checks = ArrayList<CheckResult>()
+    println()
+    commands.forEach { command ->
+        val pkg = command.substringAfterLast(' ')
+        val res = adb.shell(device.serial, command, timeoutSec = 30)
+        val status = when {
+            res.timedOut -> "timeout (${res.code})"
+            res.ok -> "ok (0)"
+            else -> "failed (${res.code})"
+        }
+        println("  $command  $status")
+
+        val dump = adb.shell(device.serial, "dumpsys package $pkg", timeoutSec = 60)
+        val setting = Verify.enabledSetting(dump.output)
+        checks += CheckResult(
+            subject = pkg,
+            command = command,
+            verdict = when {
+                !res.ok -> Verdict.REJECTED
+                setting == null -> Verdict.UNVERIFIED
+                Verify.enabled(setting) -> Verdict.EFFECTIVE
+                else -> Verdict.NO_EFFECT
+            },
+            detail = "mEnabledSetting=${Verify.enabledStateLabel(setting)}"
+        )
+    }
+
+    if (checks.isNotEmpty()) {
+        println()
+        println("[*] 复扫复核: ${Verify.summary(checks)}")
+        val props = readProps(adb, device)
+        val rom = Rom.detect(props)
+        writeVerifyReport(
+            outDir,
+            readReportMeta(adb, device, props, rom),
+            device,
+            rom,
+            checks,
+            "adblock-revert-verify.txt"
+        )
+    }
+}
+
+private fun disabledPackages(adb: Adb, serial: String): Set<String> {
+    val res = adb.shell(serial, "pm list packages -d", timeoutSec = 60)
+    if (!res.ok) return emptySet()
+    return res.output.lineSequence()
+        .map { it.trim() }
+        .filter { it.startsWith("package:") }
+        .mapTo(HashSet()) { it.removePrefix("package:") }
+}
+
+private fun writeAdblockFiles(result: ScanResult, targets: List<AdTarget>, actionablePkgs: Set<String>) {
+    val lines = ArrayList<String>()
+    lines += "# NOIR adblock plan"
+    lines += "# generated: ${result.meta.generatedAt}"
+    lines += "# tool: ${result.meta.tool}"
+    lines += "# device: ${result.device.model} (${result.device.serial}) · ${result.rom.display}"
+    lines += "# 清单行来自公开精简笔记，未在真机逐项验证；推断行只按包名形态匹配。"
+    lines += ""
+    targets.forEach { target ->
+        val run = if (target.actionable) "adb -s ${result.device.serial} shell pm disable-user --user ${result.meta.user.ifBlank { "0" }} ${target.pkg}"
+        else "# 不执行（${target.tier.label}）"
+        lines += "${target.tier.label}\t${target.source}\t${target.pkg}"
+        lines += "    ${target.name} · ${target.channel}"
+        lines += "    $run"
+    }
+    File(result.outDir, "adblock-plan.txt").writeText(lines.joinToString("\n", postfix = "\n"))
+
+    val hosts = Domains.export(result.apps.filter { it.pkg in actionablePkgs }).trackers
+    val domains = buildString {
+        appendLine("# NOIR adblock domains")
+        appendLine("# hosts the listed components report to · ${hosts.size} entries")
+        appendLine("# 只导出，不执行：NOIR 不改 DNS，把这些行交给 Pi-hole / AdGuard 自己决定。")
+        hosts.forEach { appendLine(it) }
+    }
+    File(result.outDir, "adblock-domains.txt").writeText(domains)
+
+    println()
+    println("[*] adblock plan: ${File(result.outDir, "adblock-plan.txt").absolutePath}")
+    println("[*] adblock hosts: ${File(result.outDir, "adblock-domains.txt").absolutePath} (${hosts.size})")
 }
 
 private fun cmdSetup(raw: List<String>) {
@@ -539,8 +844,11 @@ private fun performScan(args: Args): ScanResult {
     }
     say("[*] candidates (internet + sensitive): ${candidates.size}")
 
-    val android = adb.shell(device.serial, "getprop ro.build.version.release").output.trim()
-    val reportMeta = readReportMeta(adb, device, android)
+    val props = readProps(adb, device)
+    val android = props["ro.build.version.release"].orEmpty()
+    val rom = Rom.detect(props)
+    val reportMeta = readReportMeta(adb, device, props, rom)
+    say("[*] rom: ${rom.display}")
 
     val targets = candidates.map { PackagePath(it.key, paths.getValue(it.key)) }
     val endpoints = HashMap<String, List<String>>()
@@ -589,13 +897,30 @@ private fun performScan(args: Args): ScanResult {
         .sortedByDescending { it.score }
         .take(limit)
 
-    return ScanResult(device, apps, outDir, android, paths.size, paths, reportMeta)
+    return ScanResult(device, apps, outDir, android, paths.size, paths, reportMeta, rom)
 }
 
-private fun readReportMeta(adb: Adb, device: Device, android: String): ReportMeta {
-    fun prop(key: String): String =
-        adb.shell(device.serial, "getprop $key", timeoutSec = 15).output.trim()
+/** One `getprop` dump beats a round trip per key; some shells refuse the dump. */
+private fun readProps(adb: Adb, device: Device): Map<String, String> {
+    val dump = adb.shell(device.serial, "getprop", timeoutSec = 60)
+    val props = Rom.parseGetprop(dump.output)
+    if (props.isNotEmpty()) return props
 
+    val keys = listOf(
+        "ro.build.version.release", "ro.build.version.sdk", "ro.build.version.full",
+        "ro.build.display.id", "ro.build.id", "ro.build.fingerprint",
+        "ro.product.brand", "ro.product.manufacturer",
+        "ro.build.version.opporom", "ro.build.version.oplusrom", "ro.build.version.realmeui",
+        "ro.miui.ui.version.name", "ro.vivo.os.version", "ro.vivo.os.build.display.id",
+        "ro.build.version.emui", "ro.build.version.magic", "ro.build.version.oneui"
+    )
+    return keys
+        .map { it to adb.shell(device.serial, "getprop $it", timeoutSec = 15).output.trim() }
+        .filter { it.second.isNotBlank() }
+        .toMap()
+}
+
+private fun readReportMeta(adb: Adb, device: Device, props: Map<String, String>, rom: RomInfo): ReportMeta {
     val userOut = adb.shell(device.serial, "am get-current-user", timeoutSec = 15).output
     val user = userOut.lineSequence()
         .map { it.trim() }
@@ -605,10 +930,11 @@ private fun readReportMeta(adb: Adb, device: Device, android: String): ReportMet
     return ReportMeta(
         tool = "NOIR $VERSION",
         host = Platform.describe(),
-        android = android,
-        sdk = prop("ro.build.version.sdk"),
-        build = prop("ro.build.display.id").ifBlank { prop("ro.build.id") },
-        fingerprint = prop("ro.build.fingerprint"),
+        android = props["ro.build.version.release"].orEmpty(),
+        rom = if (rom.kind == RomKind.UNKNOWN) "" else rom.display,
+        sdk = props["ro.build.version.sdk"].orEmpty(),
+        build = props["ro.build.display.id"].orEmpty().ifBlank { props["ro.build.id"].orEmpty() },
+        fingerprint = props["ro.build.fingerprint"].orEmpty(),
         user = user,
         generatedAt = OffsetDateTime.now().toString()
     )
@@ -677,6 +1003,119 @@ internal data class AppOpAction(val pkg: String, val op: String) {
         if (user.isNullOrBlank()) "" else " --user $user"
 }
 
+/** One change NOIR asked the device to make, so the effect can be read back later. */
+internal data class ChangeRecord(
+    val pkg: String,
+    val kind: String,
+    val op: String = "",
+    val command: String,
+    val rollback: String
+)
+
+private const val EXPECTED_APP_OP_MODE = "ignore"
+private const val KIND_APPOPS = "appop"
+private const val KIND_DISABLE = "disable"
+private const val KIND_UNINSTALL = "uninstall"
+
+/**
+ * Reads every changed setting back after the whole batch, one command each.
+ *
+ * Doing this after the batch rather than only inline matters: a later command
+ * can undo an earlier one, and OEM skins report success without touching state.
+ */
+internal fun verifyChanges(adb: Adb, serial: String, user: String?, changes: List<ChangeRecord>): List<CheckResult> {
+    if (changes.isEmpty()) return emptyList()
+    val out = ArrayList<CheckResult>()
+
+    val disabledList = if (changes.any { it.kind == KIND_DISABLE }) {
+        adb.shell(serial, "pm list packages -d", timeoutSec = 60)
+    } else {
+        null
+    }
+    val visibleList = if (changes.any { it.kind == KIND_UNINSTALL }) {
+        adb.shell(serial, "pm list packages --user ${user ?: "0"}", timeoutSec = 120)
+    } else {
+        null
+    }
+
+    changes.forEach { change ->
+        when (change.kind) {
+            KIND_APPOPS -> {
+                val read = adb.shell(serial, AppOpAction(change.pkg, change.op).getCommand(user), timeoutSec = 30)
+                val mode = Verify.appOpMode(read.output, change.op)
+                out += CheckResult(
+                    subject = change.pkg,
+                    command = "cmd appops get ${change.op}",
+                    verdict = Verify.appOp(EXPECTED_APP_OP_MODE, mode, read.ok),
+                    detail = "当前模式 ${mode ?: (if (read.ok) "读不到" else "读取失败")}"
+                )
+            }
+
+            KIND_DISABLE -> {
+                val dump = adb.shell(serial, "dumpsys package ${change.pkg}", timeoutSec = 60)
+                val setting = Verify.enabledSetting(dump.output)
+                val verdict = when {
+                    Verify.isDisabledState(setting) -> Verdict.EFFECTIVE
+                    disabledList != null && !disabledList.ok -> Verdict.UNVERIFIED
+                    disabledList != null -> Verify.disabled(disabledList.output, change.pkg, true)
+                    else -> Verdict.UNVERIFIED
+                }
+                out += CheckResult(
+                    subject = change.pkg,
+                    command = "pm disable-user ${change.pkg}",
+                    verdict = verdict,
+                    detail = "mEnabledSetting=${Verify.enabledStateLabel(setting)}"
+                )
+            }
+
+            else -> {
+                val stillVisible = visibleList?.output
+                    ?.lineSequence()
+                    ?.any { it.trim() == "package:${change.pkg}" }
+                val verdict = when {
+                    visibleList == null || !visibleList.ok -> Verdict.UNVERIFIED
+                    stillVisible == true -> Verdict.NO_EFFECT
+                    else -> Verdict.EFFECTIVE
+                }
+                out += CheckResult(
+                    subject = change.pkg,
+                    command = "pm uninstall --user 0 ${change.pkg}",
+                    verdict = verdict,
+                    detail = if (stillVisible == true) "当前用户仍可见" else "当前用户已不可见"
+                )
+            }
+        }
+    }
+
+    return out
+}
+
+private fun writeVerifyReport(
+    outDir: File,
+    meta: ReportMeta,
+    device: Device,
+    rom: RomInfo,
+    checks: List<CheckResult>,
+    name: String = "verify.txt"
+) {
+    if (checks.isEmpty()) return
+    val lines = ArrayList<String>()
+    lines += "# NOIR 生效复核"
+    lines += "# generated: ${meta.generatedAt}"
+    lines += "# tool: ${meta.tool}"
+    lines += "# device: ${device.model} (${device.serial}) · ${rom.display}"
+    lines += "# user: ${meta.user.ifBlank { "unknown (default user)" }}"
+    lines += "# 复核读的是设备当前状态，不是命令退出码"
+    lines += ""
+    lines += Verify.summary(checks)
+    lines += ""
+    checks.forEach { check ->
+        lines += "${check.verdict.label}\t${check.subject}\t${check.command}\t${check.detail}"
+    }
+    File(outDir, name).writeText(lines.joinToString("\n", postfix = "\n"))
+    println("[*] 复核报告: ${File(outDir, name).absolutePath}")
+}
+
 private fun plannedActions(recommendations: List<Recommendation>): List<AppOpAction> =
     recommendations.filter { it.autoSafe }.mapNotNull { r ->
         when (r.action) {
@@ -691,11 +1130,6 @@ private fun plannedCommands(recommendations: List<Recommendation>, user: String?
 
 private fun rollbackLines(recommendations: List<Recommendation>, user: String? = null): List<String> =
     plannedActions(recommendations).map { it.rollbackCommand(user) }
-
-private fun parseAppOpMode(output: String, op: String): String? {
-    val match = Regex("(?m)^\\s*${Regex.escape(op)}:\\s*([a-zA-Z_]+)").find(output)
-    return match?.groupValues?.get(1)
-}
 
 private fun flatOutput(output: String): String =
     output.trim().replace("\n", " | ").ifBlank { "(no output)" }
@@ -719,6 +1153,7 @@ internal fun applyCommands(adb: Adb, result: ScanResult, planned: List<AppOpActi
     val user = result.meta.user.ifBlank { null }
     val applied = ArrayList<String>()
     val rollback = ArrayList<String>()
+    val changes = ArrayList<ChangeRecord>()
     var failed = 0
     var permissionFailures = 0
 
@@ -728,6 +1163,7 @@ internal fun applyCommands(adb: Adb, result: ScanResult, planned: List<AppOpActi
     applied.add("# host: ${result.meta.host}")
     applied.add("# device: ${result.device.model} (${result.device.serial}) · ${result.device.product}")
     applied.add("# android: ${result.meta.android} (SDK ${result.meta.sdk})")
+    applied.add("# rom: ${result.meta.rom.ifBlank { "unrecognised" }}")
     applied.add("# build: ${result.meta.build}")
     applied.add("# fingerprint: ${result.meta.fingerprint}")
     applied.add("# user: ${result.meta.user.ifBlank { "unknown (default user)" }}")
@@ -744,12 +1180,14 @@ internal fun applyCommands(adb: Adb, result: ScanResult, planned: List<AppOpActi
             else -> "failed (${res.code})"
         }
         val kind = if (!res.ok) classifyAppOpFailure(res.output) else ""
+        val afterMode = Verify.appOpMode(after.output, action.op)
+        val verdict = Verify.appOp(EXPECTED_APP_OP_MODE, afterMode, res.ok)
         if (!res.ok) {
             failed++
             if (kind == "system permission") permissionFailures++
         }
 
-        applied.add("${action.setCommand(user)}\t$status${if (kind.isNotBlank()) " [$kind]" else ""}")
+        applied.add("${action.setCommand(user)}\t$status${if (kind.isNotBlank()) " [$kind]" else ""}\t复核: ${verdict.label}")
         applied.add("  before: ${flatOutput(before.output)}")
         applied.add("  after:  ${flatOutput(after.output)}")
         if (res.output.isBlank()) {
@@ -765,11 +1203,21 @@ internal fun applyCommands(adb: Adb, result: ScanResult, planned: List<AppOpActi
             lines.take(4).forEach { println("      $it") }
             if (lines.size > 4) println("      ... (${lines.size - 4} more lines in applied.txt)")
         }
+        if (verdict != Verdict.EFFECTIVE) {
+            println("      复核：${verdict.label}（退出码不代表生效，当前模式 ${afterMode ?: "读不到"}）")
+        }
 
-        if (res.ok) {
-            val prior = parseAppOpMode(before.output, action.op) ?: "default"
+        if (verdict == Verdict.EFFECTIVE) {
+            val prior = Verify.appOpMode(before.output, action.op) ?: "default"
             rollback.add(action.rollbackCommand(user, prior))
         }
+        changes += ChangeRecord(
+            pkg = action.pkg,
+            kind = KIND_APPOPS,
+            op = action.op,
+            command = action.setCommand(user),
+            rollback = action.rollbackCommand(user)
+        )
     }
 
     File(result.outDir, "applied.txt").writeText(applied.joinToString("\n", postfix = "\n"))
@@ -778,7 +1226,7 @@ internal fun applyCommands(adb: Adb, result: ScanResult, planned: List<AppOpActi
         appendLine("# NOIR rollback")
         appendLine("# generated: ${result.meta.generatedAt}")
         appendLine("# tool: ${result.meta.tool}")
-        appendLine("# only commands that succeeded in this run are listed")
+        appendLine("# only commands that were verified as effective are listed")
         appendLine("# device: ${result.device.model} (${result.device.serial}) · user ${result.meta.user.ifBlank { "unknown" }}")
         if (rollback.isEmpty()) {
             appendLine("# no appops changes were applied")
@@ -790,6 +1238,16 @@ internal fun applyCommands(adb: Adb, result: ScanResult, planned: List<AppOpActi
     File(result.outDir, "applied.txt").let { println("\n[*] applied: ${it.absolutePath}") }
     println("[*] rollback: ${File(result.outDir, "rollback.txt").absolutePath}")
     println("[*] ${planned.size - failed}/${planned.size} appops commands applied")
+
+    val checks = verifyChanges(adb, result.device.serial, user, changes)
+    if (checks.isNotEmpty()) {
+        println("[*] 复扫复核: ${Verify.summary(checks)}")
+        checks.filter { it.verdict != Verdict.EFFECTIVE }.take(10).forEach {
+            println("  ${"%-10s".format(it.verdict.label)} ${it.subject}  ${it.detail}")
+        }
+        writeVerifyReport(result.outDir, result.meta, result.device, result.rom, checks)
+        if (checks.any { it.verdict == Verdict.NO_EFFECT }) println(Guidance.silentRejectNote(result.rom))
+    }
 
     if (failed > 0) {
         println("[!] $failed command(s) failed — full stdout/stderr is in applied.txt")
@@ -809,6 +1267,7 @@ private fun renderDashboard(args: Args, result: ScanResult, recommendations: Lis
         apps = result.apps,
         recommendations = recommendations,
         android = result.android,
+        rom = if (result.rom.kind == RomKind.UNKNOWN) "" else result.rom.display,
         host = Platform.describe(),
         installed = result.installed,
         ascii = args.flag("ascii"),
